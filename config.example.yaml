@@ -50,6 +50,38 @@ comfyui:
     # Video prompt prefix (optional)
     prompt_prefix: "Minimalist black-and-white matchstick figure style illustration, clean lines, simple sketch style"
 
+# ==================== Publishers Configuration ====================
+# Configuration for per-platform publishers (YouTube, etc.).
+# Each platform is opt-in (`enabled: true`) and uses its own credential files.
+publishers:
+  youtube:
+    enabled: false  # Set to true to allow auto_publish=true on /api/video/generate/*
+
+    # Path to OAuth 2.0 client secrets JSON downloaded from Google Cloud Console.
+    # Setup steps:
+    #   1. Create a Google Cloud project and enable "YouTube Data API v3"
+    #      (https://console.cloud.google.com/apis/library/youtube.googleapis.com)
+    #   2. Create OAuth 2.0 Client ID of type "Desktop app"
+    #   3. Download the JSON and place it at the path below (gitignored by `secrets/`)
+    client_secrets_file: secrets/youtube_oauth_client.json
+
+    # Path where the runtime-managed refresh token is cached.
+    # Populated by `uv run python -m pixelle_video.publishers.youtube.auth` (one-time, browser).
+    token_file: data/credentials/youtube_token.json
+
+    # Defaults applied to every upload when not overridden in the publish request.
+    default_privacy_status: private   # private | unlisted | public
+    default_category_id: "22"         # 22 = People & Blogs (see YouTube Data API videoCategories.list)
+    default_made_for_kids: false      # COPPA flag; must be set on every upload
+    default_language: null            # ISO code like 'vi' or 'en'; null lets YouTube auto-detect
+
+    # LLM-generated metadata limits
+    max_tags: 5
+    description_prompt_extra: ""      # Extra branding/channel context appended to description prompt
+
+    # ⚠️ YouTube Data API quota: each upload costs 1600 units (daily default = 10000),
+    # which caps you at ~6 uploads/day per Google Cloud project until you request a quota increase.
+
 # ==================== Template Configuration ====================
 # Configure default template for video generation
 template:

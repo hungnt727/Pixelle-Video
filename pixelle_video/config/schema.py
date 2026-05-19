@@ -15,7 +15,8 @@ Configuration schema with Pydantic models
 
 Single source of truth for all configuration defaults and validation.
 """
-from typing import Optional
+from typing import Literal, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -88,12 +89,52 @@ class TemplateConfig(BaseModel):
     )
 
 
+class YouTubeConfig(BaseModel):
+    """YouTube publisher configuration"""
+    enabled: bool = Field(default=False, description="Enable YouTube publisher")
+    client_secrets_file: str = Field(
+        default="secrets/youtube_oauth_client.json",
+        description="Path to OAuth client secrets JSON downloaded from Google Cloud Console"
+    )
+    token_file: str = Field(
+        default="data/credentials/youtube_token.json",
+        description="Path where refresh token is cached (runtime-managed, gitignored)"
+    )
+    default_privacy_status: Literal["private", "unlisted", "public"] = Field(
+        default="private",
+        description="Default video privacy when not overridden by request"
+    )
+    default_category_id: str = Field(
+        default="22",
+        description="Default YouTube category ID (22 = People & Blogs)"
+    )
+    default_made_for_kids: bool = Field(
+        default=False,
+        description="Default 'made for kids' flag (COPPA compliance)"
+    )
+    default_language: Optional[str] = Field(
+        default=None,
+        description="Default ISO language code for video metadata (e.g. 'vi', 'en'). None lets YouTube auto-detect."
+    )
+    max_tags: int = Field(default=5, ge=0, le=15, description="Max LLM-generated tags per video")
+    description_prompt_extra: str = Field(
+        default="",
+        description="Extra instructions appended to the LLM description prompt (e.g. channel branding)"
+    )
+
+
+class PublishersConfig(BaseModel):
+    """Publisher configurations (per-platform)"""
+    youtube: YouTubeConfig = Field(default_factory=YouTubeConfig)
+
+
 class PixelleVideoConfig(BaseModel):
     """Pixelle-Video main configuration"""
     project_name: str = Field(default="Pixelle-Video", description="Project name")
     llm: LLMConfig = Field(default_factory=LLMConfig)
     comfyui: ComfyUIConfig = Field(default_factory=ComfyUIConfig)
     template: TemplateConfig = Field(default_factory=TemplateConfig)
+    publishers: PublishersConfig = Field(default_factory=PublishersConfig)
     
     def is_llm_configured(self) -> bool:
         """Check if LLM is properly configured"""

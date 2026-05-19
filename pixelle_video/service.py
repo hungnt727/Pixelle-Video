@@ -18,24 +18,26 @@ Provides unified access to all capabilities (LLM, TTS, Image, etc.)
 
 import hashlib
 import json
-from typing import Optional
+import re
+from typing import Any, Callable, Optional
 
-from loguru import logger
 from comfykit import ComfyKit
+from loguru import logger
 
 from pixelle_video.config import config_manager
-from pixelle_video.services.llm_service import LLMService
-from pixelle_video.services.tts_service import TTSService
-from pixelle_video.services.media import MediaService
-from pixelle_video.services.image_analysis import ImageAnalysisService
-from pixelle_video.services.video_analysis import VideoAnalysisService
-from pixelle_video.services.video import VideoService
-from pixelle_video.services.frame_processor import FrameProcessor
-from pixelle_video.services.persistence import PersistenceService
-from pixelle_video.services.history_manager import HistoryManager
-from pixelle_video.pipelines.standard import StandardPipeline
-from pixelle_video.pipelines.custom import CustomPipeline
 from pixelle_video.pipelines.asset_based import AssetBasedPipeline
+from pixelle_video.pipelines.custom import CustomPipeline
+from pixelle_video.pipelines.standard import StandardPipeline
+from pixelle_video.publishers.base import BasePublisher, PublishResult
+from pixelle_video.services.frame_processor import FrameProcessor
+from pixelle_video.services.history_manager import HistoryManager
+from pixelle_video.services.image_analysis import ImageAnalysisService
+from pixelle_video.services.llm_service import LLMService
+from pixelle_video.services.media import MediaService
+from pixelle_video.services.persistence import PersistenceService
+from pixelle_video.services.tts_service import TTSService
+from pixelle_video.services.video import VideoService
+from pixelle_video.services.video_analysis import VideoAnalysisService
 
 
 class PixelleVideoCore:
@@ -97,7 +99,10 @@ class PixelleVideoCore:
         
         # Video generation pipelines (dictionary of pipeline_name -> pipeline_instance)
         self.pipelines = {}
-        
+
+        # Publishers (dictionary of platform_name -> BasePublisher), populated in initialize()
+        self._publishers: dict[str, BasePublisher] = {}
+
         # Default pipeline callable (for backward compatibility)
         self.generate_video = None
     
@@ -212,12 +217,29 @@ class PixelleVideoCore:
             "asset_based": AssetBasedPipeline(self),
         }
         logger.info(f"📹 Registered pipelines: {', '.join(self.pipelines.keys())}")
-        
-        # 3. Set default pipeline callable (for backward compatibility)
+
+        # 3. Register publishers (opt-in via config)
+        self._init_publishers()
+
+        # 4. Set default pipeline callable (for backward compatibility)
         self.generate_video = self._create_generate_video_wrapper()
-        
+
         self._initialized = True
         logger.info("✅ Pixelle-Video initialized successfully\n")
+
+    def _init_publishers(self):
+        """Instantiate publishers whose `enabled` flag is true in config."""
+        publishers_config = config_manager.config.publishers
+        self._publishers = {}
+        if publishers_config.youtube.enabled:
+            from pixelle_video.publishers.youtube import YouTubePublisher
+
+            self._publishers["youtube"] = YouTubePublisher(publishers_config.youtube)
+            logger.info("📺 YouTube publisher enabled")
+        if self._publishers:
+            logger.info(f"📤 Registered publishers: {', '.join(self._publishers.keys())}")
+        else:
+            logger.debug("No publishers enabled in config")
     
     async def cleanup(self):
         """
@@ -294,6 +316,123 @@ class PixelleVideoCore:
         
         return generate_video_wrapper
     
+    async def publish(
+        self,
+        task_id: str,
+        platform: str = "youtube",
+        *,
+        force: bool = False,
+        title_override: Optional[str] = None,
+        description_override: Optional[str] = None,
+        tags_override: Optional[list[str]] = None,
+        privacy_status: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> tuple[PublishResult, bool]:
+        """
+        Publish a previously generated video to one platform.
+
+        Returns:
+            (result, cached) — cached=True means an existing publish was found
+            in metadata and no upload was performed.
+        """
+        if not self._initialized:
+            raise RuntimeError(
+                "PixelleVideoCore not initialized. Call await core.initialize() first."
+            )
+
+        publisher = self._publishers.get(platform)
+        if publisher is None:
+            raise ValueError(
+                f"Publisher '{platform}' is not enabled. Set "
+                f"config.publishers.{platform}.enabled=true and configure credentials."
+            )
+
+        metadata = await self.persistence.load_task_metadata(task_id)
+        if not metadata:
+            raise FileNotFoundError(f"Task metadata not found for task_id={task_id}")
+
+        existing = (metadata.get("published_to") or {}).get(platform)
+        if existing and not force:
+            logger.info(f"⏭️ Task {task_id} already published to {platform}; returning cached")
+            return PublishResult(**existing), True
+
+        video_path = (metadata.get("result") or {}).get("video_path")
+        if not video_path:
+            raise ValueError(f"Task {task_id} has no result.video_path; cannot publish")
+
+        storyboard = None
+        title = title_override or (metadata.get("input") or {}).get("title")
+        if not title:
+            storyboard = await self.persistence.load_storyboard(task_id)
+            if storyboard:
+                title = storyboard.title
+        if not title:
+            raise ValueError(
+                f"Task {task_id} has no title; pass title_override on the publish request."
+            )
+
+        if description_override is not None and tags_override is not None:
+            description = description_override
+            tags = list(tags_override)
+        else:
+            if storyboard is None:
+                storyboard = await self.persistence.load_storyboard(task_id)
+            narrations = [f.narration for f in storyboard.frames] if storyboard else []
+            gen_description, gen_tags = await self._generate_publish_metadata(
+                platform=platform, title=title, narrations=narrations
+            )
+            description = description_override if description_override is not None else gen_description
+            tags = list(tags_override) if tags_override is not None else gen_tags
+
+        upload_opts: dict[str, Any] = {}
+        if privacy_status is not None:
+            upload_opts["privacy_status"] = privacy_status
+
+        result = await publisher.upload(
+            video_path=video_path,
+            title=title,
+            description=description,
+            tags=tags,
+            progress_callback=progress_callback,
+            **upload_opts,
+        )
+
+        published_to = metadata.get("published_to") or {}
+        published_to[platform] = result.model_dump(mode="json")
+        metadata["published_to"] = published_to
+        await self.persistence.save_task_metadata(task_id, metadata)
+
+        return result, False
+
+    async def _generate_publish_metadata(
+        self,
+        platform: str,
+        title: str,
+        narrations: list[str],
+    ) -> tuple[str, list[str]]:
+        """Ask the LLM for a platform description + tags. YouTube only for now."""
+        if platform != "youtube":
+            return "", []
+
+        from pixelle_video.prompts import build_description_generation_prompt
+
+        yt_config = config_manager.config.publishers.youtube
+        prompt = build_description_generation_prompt(
+            title=title,
+            narrations=narrations,
+            max_tags=yt_config.max_tags,
+            extra_instructions=yt_config.description_prompt_extra,
+        )
+        response = await self.llm(prompt, temperature=0.7, max_tokens=1500)
+
+        parsed = _parse_publish_metadata_json(response)
+        description = str(parsed.get("description", "")).strip()
+        raw_tags = parsed.get("tags") or []
+        tags: list[str] = []
+        if isinstance(raw_tags, list):
+            tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+        return description, tags
+
     @property
     def project_name(self) -> str:
         """Get project name from config"""
@@ -304,6 +443,30 @@ class PixelleVideoCore:
         status = "initialized" if self._initialized else "not initialized"
         pipelines = f"pipelines={list(self.pipelines.keys())}" if self._initialized else ""
         return f"<PixelleVideoCore project={self.project_name!r} status={status} {pipelines}>"
+
+
+def _parse_publish_metadata_json(text: str) -> dict:
+    """Extract the publish-metadata JSON object from an LLM response."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    obj = re.search(r"\{[\s\S]*\}", text)
+    if obj:
+        try:
+            return json.loads(obj.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    raise json.JSONDecodeError("No publish metadata JSON found in LLM response", text, 0)
 
 
 # Global instance

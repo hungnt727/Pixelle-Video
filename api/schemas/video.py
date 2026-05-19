@@ -14,8 +14,11 @@
 Video generation API schemas
 """
 
-from typing import Optional, Literal, Dict, Any
+from typing import Any, Dict, Literal, Optional
+
 from pydantic import BaseModel, Field
+
+from api.schemas.publish import PublishRequest
 
 
 class VideoGenerateRequest(BaseModel):
@@ -82,6 +85,20 @@ class VideoGenerateRequest(BaseModel):
     # === BGM ===
     bgm_path: Optional[str] = Field(None, description="Background music path")
     bgm_volume: float = Field(0.3, ge=0.0, le=1.0, description="BGM volume (0.0-1.0)")
+
+    # === Auto-publish ===
+    auto_publish: bool = Field(
+        False,
+        description=(
+            "If true, automatically enqueue a publish task once generation completes. "
+            "The publish runs in its own TaskManager task; polling /api/tasks/{publish_task_id} "
+            "shows upload status. Requires the target platform to be enabled in config.publishers."
+        ),
+    )
+    publish: Optional[PublishRequest] = Field(
+        None,
+        description="Per-request overrides for the auto-publish step (platform, title_override, ...).",
+    )
     
     class Config:
         json_schema_extra = {
@@ -106,6 +123,14 @@ class VideoGenerateResponse(BaseModel):
     video_url: str = Field(..., description="URL to access generated video")
     duration: float = Field(..., description="Video duration in seconds")
     file_size: int = Field(..., description="File size in bytes")
+    task_id: Optional[str] = Field(
+        None,
+        description="Generation task ID — only set when auto_publish was enabled.",
+    )
+    publish_task_id: Optional[str] = Field(
+        None,
+        description="Publish task ID — only set when auto_publish was enabled. Poll /api/tasks/{id}.",
+    )
 
 
 class VideoGenerateAsyncResponse(BaseModel):

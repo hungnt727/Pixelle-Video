@@ -109,6 +109,9 @@ pixelle_video/             Core library (where business logic lives)
     storyboard.py          Storyboard, StoryboardFrame, VideoGenerationResult
     media.py               Media asset models
     progress.py            ProgressEvent — emitted to API/Web during generation
+  publishers/              Per-platform upload integrations (opt-in)
+    base.py                BasePublisher ABC + PublishResult model
+    youtube/               YouTubePublisher + OAuth CLI (`python -m pixelle_video.publishers.youtube.auth`)
   prompts/                 LLM prompt templates (one file per prompt type)
   utils/                   llm_util, template_util, workflow_util, tts_util, ...
   tts_voices.py            Voice ID → engine/locale mapping
@@ -165,6 +168,7 @@ The workspace conventions in `../CLAUDE.md` apply. Project-specific additions:
 |---|---|
 | Add a new API endpoint | `api/schemas/<domain>.py` → `api/routers/<domain>.py` → wire in `api/app.py` |
 | Add a new pipeline (generation flow) | Subclass `pixelle_video/pipelines/base.py:BasePipeline`, register in `service.py` |
+| Add a new publisher (e.g. Facebook, TikTok) | Subclass `pixelle_video/publishers/base.py:BasePublisher`, add `<Platform>Config` to `config/schema.py`, register in `service.py:_init_publishers` |
 | Add a new LLM provider | `pixelle_video/llm_presets.py` + `pixelle_video/services/llm_service.py` (it's OpenAI-SDK compatible, so usually just preset + base_url) |
 | Add a new TTS voice | `pixelle_video/tts_voices.py` (and a ComfyUI workflow under `workflows/` if needed) |
 | Add a new visual template | Drop HTML file in `templates/<dimension>/` — must include `<meta name="dimension" content="WxH">` |
@@ -186,6 +190,7 @@ The workspace conventions in `../CLAUDE.md` apply. Project-specific additions:
 
 ## High-signal docs to read
 
+- **YouTube publishing**: opt-in via `auto_publish=true` on `/api/video/generate/*` or `POST /api/publish/{task_id}`. First-time setup uses `uv run python -m pixelle_video.publishers.youtube.auth` (browser-based OAuth). Quota: 1 upload = 1600 units, ~6 uploads/day on a default Google Cloud project. Publish runs as a separate `TaskType.PUBLISH` task — generation is never blocked by upload.
 - `docs/en/development/architecture.md` — layered design overview.
 - `docs/en/reference/api-overview.md` — endpoint reference.
 - `docs/en/reference/config-schema.md` — every config field documented.

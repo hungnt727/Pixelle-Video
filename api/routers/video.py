@@ -17,16 +17,19 @@ Supports both synchronous and asynchronous video generation.
 """
 
 import os
+
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 
 from api.dependencies import PixelleVideoDep
+from api.routers.publish import enqueue_publish_task
+from api.schemas.publish import PublishRequest
 from api.schemas.video import (
+    VideoGenerateAsyncResponse,
     VideoGenerateRequest,
     VideoGenerateResponse,
-    VideoGenerateAsyncResponse,
 )
-from api.tasks import task_manager, TaskType
+from api.tasks import TaskType, task_manager
 
 router = APIRouter(prefix="/video", tags=["Video Generation"])
 
@@ -54,8 +57,8 @@ def path_to_url(request: Request, file_path: str) -> str:
         
         Domain:  With domain request -> https://your-domain.com/api/files/...
     """
-    from pathlib import Path
     import os
+    from pathlib import Path
     
     # Normalize path separators to forward slashes first (for cross-platform compatibility)
     file_path = file_path.replace("\\", "/")
@@ -157,17 +160,35 @@ async def generate_video_sync(
         
         # Call video generator service
         result = await pixelle_video.generate_video(**video_params)
-        
+
         # Get file size
         file_size = os.path.getsize(result.video_path) if os.path.exists(result.video_path) else 0
-        
+
         # Convert path to URL
         video_url = path_to_url(request, result.video_path)
-        
+
+        # Optional auto-publish: enqueue a PUBLISH TaskManager task and return its id
+        publish_task_id = None
+        generation_task_id = None
+        if request_body.auto_publish:
+            generation_task_id = result.storyboard.config.task_id
+            publish_opts = request_body.publish or PublishRequest()
+            try:
+                publish_task_id, _cached = await enqueue_publish_task(
+                    task_id=generation_task_id,
+                    request_body=publish_opts,
+                    pixelle_video=pixelle_video,
+                )
+            except Exception as pub_err:
+                # Generation succeeded; publish failed to enqueue. Log + return without crashing.
+                logger.error(f"auto_publish failed to enqueue: {pub_err}")
+
         return VideoGenerateResponse(
             video_url=video_url,
             duration=result.duration,
-            file_size=file_size
+            file_size=file_size,
+            task_id=generation_task_id,
+            publish_task_id=publish_task_id,
         )
         
     except Exception as e:
@@ -261,18 +282,35 @@ async def generate_video_async(
                 video_params["template_params"] = request_body.template_params
             
             result = await pixelle_video.generate_video(**video_params)
-            
+
             # Get file size
             file_size = os.path.getsize(result.video_path) if os.path.exists(result.video_path) else 0
-            
+
             # Convert path to URL
             video_url = path_to_url(request, result.video_path)
-            
-            return {
+
+            response_payload = {
                 "video_url": video_url,
                 "duration": result.duration,
-                "file_size": file_size
+                "file_size": file_size,
             }
+
+            # Optional auto-publish chained as its own TaskManager task
+            if request_body.auto_publish:
+                generation_task_id = result.storyboard.config.task_id
+                publish_opts = request_body.publish or PublishRequest()
+                try:
+                    publish_task_id, _ = await enqueue_publish_task(
+                        task_id=generation_task_id,
+                        request_body=publish_opts,
+                        pixelle_video=pixelle_video,
+                    )
+                    response_payload["task_id"] = generation_task_id
+                    response_payload["publish_task_id"] = publish_task_id
+                except Exception as pub_err:
+                    logger.error(f"auto_publish failed to enqueue: {pub_err}")
+
+            return response_payload
         
         # Start execution
         await task_manager.execute_task(
